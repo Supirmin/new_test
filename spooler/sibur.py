@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import pymupdf
 
+from . import ocr
 from .models import SpoolRow
 from .pdf_reader import MaterialItem, Sheet
 
@@ -239,6 +240,51 @@ def _cluster(marks: list[Mark], radius: float = 25) -> list[list[Mark]]:
     return list(groups.values())
 
 
+def _cut_list(page) -> tuple[dict[str, tuple[str, float]], list]:
+    """Таблица длин катушек, вставленная в лист картинкой.
+
+    Строка такой таблицы — «№ трубы в спец. | № катушки | DN | Размер, мм».
+    Возвращаем катушку -> (номер позиции спецификации, длина в мм) и
+    прямоугольники распознанных картинок, чтобы потом не спутать строки
+    таблицы с подписями на самом чертеже.
+    """
+    table: dict[str, tuple[str, float]] = {}
+    rects = []
+    for rect, words in ocr.read_images(page):
+        rects.append(rect)
+        found: dict[str, tuple[str, float]] = {}
+        for row in ocr.rows(words):
+            texts = [w.text.strip() for w in row]
+            if len(texts) < 4:
+                continue
+            piece = ocr.piece_number(texts[1])
+            if not piece or not re.fullmatch(r"\d{1,3}", texts[0]):
+                continue
+            numbers = [t for t in texts[2:]
+                       if re.fullmatch(r"[\d.,]+", t.replace(" ", ""))]
+            if len(numbers) < 2:
+                continue
+            found[piece] = (texts[0], float(numbers[-1].replace(",", ".")))
+        if len(found) >= 2:
+            table.update(found)
+    return table, rects
+
+
+def _piece_marks(page, rects) -> list[tuple[str, str, Mark]]:
+    """Метки катушек на самом чертеже: «1<9>» — позиция 1, катушка 9."""
+    out = []
+    for word in ocr.read_page(page):
+        piece = ocr.piece_number(word.text)
+        if not piece:
+            continue
+        if any(r.contains(pymupdf.Point(word.x, word.y)) for r in rects):
+            continue                                   # это строка таблицы
+        head = re.match(r"\D*(\d{1,3})\s*<", word.text.replace(" ", ""))
+        out.append((piece, head.group(1) if head else "",
+                    Mark(word.text, word.x, word.y, 0.0, False)))
+    return out
+
+
 def read(page, page_no: int) -> tuple[Sheet, list[SpoolRow]]:
     text = page.get_text()
     sheet = Sheet(page=page_no)
@@ -273,23 +319,35 @@ def read(page, page_no: int) -> tuple[Sheet, list[SpoolRow]]:
     diameters = {part.strip() for item in sheet.materials
                  for part in re.split(r"[xX]", item.size) if part.strip()}
     lengths, cut_size = _cut_lengths(numeric, diameters)
+
+    # Если длины вынесены в таблицу-картинку, доверяем ей: там они выписаны
+    # прямо, а не выводятся из размерных цепочек.
+    table, rects = _cut_list(page) if ocr.available() else ({}, [])
+    if table:
+        pieces = _piece_marks(page, rects)
+        if pieces:
+            sheet.notes.append(
+                f"длины взяты из таблицы катушек, вставленной картинкой: "
+                f"распознано {len(table)} строк")
+            return sheet, _rows_from_table(sheet, spool_marks, table, pieces,
+                                           _balloons(marks, spool_marks, lengths,
+                                                     cut_size, diameters, sheet))
+        sheet.notes.append(
+            "таблица длин катушек распознана, но на чертеже не нашлось меток "
+            "катушек — длины привязать не к чему")
+
     if not lengths:
         sheet.notes.append(
-            "не удалось отличить длины отрезков трубы от размерных цепочек")
+            "не удалось отличить длины отрезков трубы от размерных цепочек"
+            + ("" if ocr.available() else
+               "; распознавание картинок недоступно — поставьте "
+               "rapidocr-onnxruntime"))
         return sheet, []
 
     # Теперь рамка точная — по спулам и найденным длинам. Выноска позиции
     # повёрнута как придётся — вдоль трубы или вертикально, — поэтому
     # опознаём её по значению: это номер строки спецификации, не размер.
-    inside = _inside(_drawing_box(spool_marks + lengths))
-    last = max((int(m.pt_no) for m in sheet.materials if m.pt_no.isdigit()),
-               default=0)
-    chosen = {id(m) for m in lengths}
-    balloons = [m for m in marks
-                if re.fullmatch(r"\d{1,3}", m.text) and inside(m)
-                and id(m) not in chosen
-                and 0 < int(m.text) <= last
-                and m.text not in diameters]
+    balloons = _balloons(marks, spool_marks, lengths, cut_size, diameters, sheet)
 
     sheet.marked_spools = sorted({_nearest(m, spool_marks) for m in spool_marks})
     return sheet, _rows(sheet, spool_marks, lengths, balloons)
@@ -305,6 +363,55 @@ def _nearest_pipe(mark: Mark, pipe_balloons: list[Mark],
     if math.hypot(best.x - mark.x, best.y - mark.y) > radius:
         return None
     return best.text.lstrip("0")
+
+
+def _balloons(marks, spool_marks, lengths, cut_size, diameters, sheet) -> list[Mark]:
+    """Выноски позиций спецификации.
+
+    Выноска повёрнута как придётся — вдоль трубы или вертикально, — поэтому
+    опознаём её по значению: это номер строки спецификации, а не размер и не
+    диаметр.
+    """
+    inside = _inside(_drawing_box(spool_marks + lengths))
+    last = max((int(m.pt_no) for m in sheet.materials if m.pt_no.isdigit()),
+               default=0)
+    chosen = {id(m) for m in lengths}
+    return [m for m in marks
+            if re.fullmatch(r"\d{1,3}", m.text) and inside(m)
+            and id(m) not in chosen
+            and 0 < int(m.text) <= last
+            and m.text not in diameters]
+
+
+def _rows_from_table(sheet: Sheet, spool_marks: list[Mark],
+                     table: dict[str, tuple[str, float]],
+                     pieces: list[tuple[str, str, Mark]],
+                     balloons: list[Mark]) -> list[SpoolRow]:
+    """Собрать состав, когда длины известны из таблицы катушек."""
+    fabrication = {m.pt_no: m for m in sheet.materials if not m.erection}
+    totals: dict[tuple[str, str], float] = defaultdict(float)
+
+    used: set[str] = set()
+    for piece, item_on_drawing, mark in pieces:
+        if piece in used or piece not in table:
+            continue
+        used.add(piece)
+        item, length = table[piece]
+        no = item_on_drawing if item_on_drawing in fabrication else item
+        if no in fabrication:
+            totals[(_nearest(mark, spool_marks), no)] += length
+
+    for mark in balloons:
+        no = mark.text.lstrip("0")
+        if no in fabrication and _mm(fabrication[no].qty) is None:
+            totals[(_nearest(mark, spool_marks), no)] += 1
+
+    missing = sorted(set(table) - used, key=int)
+    if missing:
+        sheet.notes.append(
+            "катушки " + ", ".join(f"<{m}>" for m in missing)
+            + " есть в таблице, но не найдены на чертеже — их длины не разнесены")
+    return _emit(sheet, fabrication, totals)
 
 
 def _rows(sheet: Sheet, spool_marks: list[Mark], lengths: list[Mark],
@@ -337,18 +444,8 @@ def _rows(sheet: Sheet, spool_marks: list[Mark], lengths: list[Mark],
         if no in fabrication and no not in pipes:
             totals[(_nearest(mark, spool_marks), no)] += 1
 
-    rows = []
-    for (spool, no), qty in sorted(totals.items()):
-        if not in_request(no):
-            continue
-        item = fabrication[no]
-        rows.append(SpoolRow(
-            iso=sheet.iso, line=sheet.line, revision=sheet.revision, spool=spool,
-            ident=item.ident, qty=qty, unit="мм" if no in pipes else "шт",
-            size=item.size, description=item.description))
-
     _check_totals(sheet, pipes, totals, fabrication, balloons, in_request)
-    return rows
+    return _emit(sheet, fabrication, totals)
 
 
 def _check_totals(sheet: Sheet, pipes, totals, fabrication, balloons, keep) -> None:
@@ -368,3 +465,20 @@ def _check_totals(sheet: Sheet, pipes, totals, fabrication, balloons, keep) -> N
         sheet.notes.append(
             f"поз. {no} ({item.ident}, {item.qty} шт) на чертеже не найдена — "
             "в заявку не попала, впишите вручную")
+
+
+def _emit(sheet: Sheet, fabrication: dict[str, MaterialItem],
+          totals: dict[tuple[str, str], float]) -> list[SpoolRow]:
+    """Строки заявки; мелочь ниже DN50 не идёт, бобышка на основной трубе идёт."""
+    rows = []
+    for (spool, no), qty in sorted(totals.items()):
+        item = fabrication[no]
+        dn = _main_dn(item.size)
+        if dn is not None and dn < 50:
+            continue
+        rows.append(SpoolRow(
+            iso=sheet.iso, line=sheet.line, revision=sheet.revision, spool=spool,
+            ident=item.ident, qty=qty,
+            unit="мм" if _mm(item.qty) is not None else "шт",
+            size=item.size, description=item.description))
+    return rows
