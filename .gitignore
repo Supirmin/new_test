@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
 *.xlsx
+spravochnik.json
 !tests/fixtures/*.xlsx
 .venv/

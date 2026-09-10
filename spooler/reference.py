@@ -5,8 +5,9 @@
 """
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import openpyxl
 
@@ -68,6 +69,51 @@ class Reference:
         return "x".join(out) if all(out) else ""
 
 
+
+    def save(self, path: str) -> None:
+        """Сохранить справочник рядом с программой, чтобы не таскать книгу."""
+        data = {
+            "entries": {k: asdict(v) for k, v in self.entries.items()},
+            "dn_to_inch": {str(k): v for k, v in self.dn_to_inch.items()},
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=1)
+
+    @classmethod
+    def load(cls, path: str) -> "Reference":
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        entries = {k: Entry(**v) for k, v in data["entries"].items()}
+        dn = {float(k): v for k, v in data["dn_to_inch"].items()}
+        return cls(entries, dn)
+
 def _fmt_inch(value: float) -> str:
     text = f"{value:g}".replace(".", ",")
     return text
+
+
+# Запасной перевод по английскому описанию из спецификации: нужен, когда
+# в справочнике «База» ещё нет такой позиции — на новых схемах это обычное дело.
+_BY_DESCRIPTION: tuple[tuple[str, str, str], ...] = (
+    ("blind flange", "Заглушка", "шт"),
+    ("figure 8 blank", "Заглушка", "шт"),
+    ("spectacle", "Заглушка", "шт"),
+    ("reducer", "Переход", "шт"),
+    ("tee", "Тройник", "шт"),
+    ("elbow", "Отвод", "шт"),
+    ("olet", "Бобышка", "шт"),
+    ("flange", "Фланец", "шт"),
+    ("gasket", "Прокладка", "шт"),
+    ("coupling", "Муфта", "шт"),
+    ("cap", "Заглушка", "шт"),
+    ("pipe", "Труба", "мм"),
+)
+
+
+def guess_entry(ident: str, description: str) -> Entry | None:
+    """Определить тип детали по описанию, когда Ident не найден в «Базе»."""
+    text = description.lower()
+    for keyword, kind, unit in _BY_DESCRIPTION:
+        if keyword in text:
+            return Entry(ident=ident, kind=kind, name=description, unit=unit)
+    return None

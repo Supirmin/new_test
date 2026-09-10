@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from .reference import Reference
+from .reference import Reference, guess_entry
 from .spools import SpoolRow
 
 HEADERS = [
@@ -73,7 +73,13 @@ def write_workbook(path: str, rows: list[SpoolRow], reference: Reference,
     for row in sorted(rows, key=lambda r: (r.iso, _spool_order(r.spool), r.ident)):
         entry = reference.lookup(row.ident)
         if entry is None:
-            issues.append(Issue(row.iso, row.spool, "нет в справочнике «База»", row.ident))
+            entry = guess_entry(row.ident, row.description)
+            issues.append(Issue(
+                row.iso, row.spool, "нет в справочнике «База»",
+                f"{row.ident} — "
+                + (f"тип определён по описанию как «{entry.kind}», проверьте и "
+                   f"добавьте позицию в «Базу»" if entry
+                   else "тип определить не удалось, заполните вручную")))
         title = row.iso.split("-")[1] if len(row.iso.split("-")) > 1 else ""
         qty = int(row.qty) if float(row.qty).is_integer() else row.qty
         values = [
