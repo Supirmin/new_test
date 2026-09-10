@@ -21,9 +21,11 @@ if not exist ".deps-ok" (
     echo ok> .deps-ok
 )
 
-%PY% -m spooler.cli %*
-echo.
-pause
+%PY% -m spooler %*
+if errorlevel 1 (
+    echo.
+    pause
+)
 exit /b 0
 
 :fail
