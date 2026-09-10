@@ -15,21 +15,29 @@ from .pdf_reader import read_pdf
 from .reference import Reference
 from .spools import process
 
-DEFAULT_REFERENCE = "spravochnik.json"
+DEFAULT_REFERENCE = str(pathlib.Path(__file__).resolve().parent.parent / "spravochnik.json")
+DEFAULT_OUT = "Заявка.xlsx"
 
 
-def collect_pdfs(paths: list[str]) -> list[pathlib.Path]:
-    """Аргументом можно давать и файлы, и папки с изометриями."""
-    found: list[pathlib.Path] = []
+def sort_inputs(paths: list[str]) -> tuple[list[pathlib.Path], str | None]:
+    """Разложить перетащенные файлы: PDF — чертежи, XLSX — рабочая книга.
+
+    Так значок программы работает как приёмник: бросил на него файлы —
+    и не надо помнить, каким ключом что передаётся.
+    """
+    pdfs: list[pathlib.Path] = []
+    book: str | None = None
     for item in paths:
         p = pathlib.Path(item)
         if p.is_dir():
-            found.extend(sorted(p.rglob("*.pdf")))
-        elif p.is_file():
-            found.append(p)
-        else:
+            pdfs.extend(sorted(p.rglob("*.pdf")))
+        elif p.suffix.lower() == ".pdf":
+            pdfs.append(p)
+        elif p.suffix.lower() in (".xlsx", ".xlsm"):
+            book = str(p)
+        elif not p.exists():
             raise FileNotFoundError(f"не найдено: {item}")
-    return found
+    return pdfs, book
 
 
 def load_reference(book: str | None, cache: str) -> Reference:
@@ -83,19 +91,25 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="spooler",
         description="Читает изометрии из PDF и собирает заявку по спулам в Excel.")
-    ap.add_argument("pdf", nargs="+", help="PDF с изометриями или папка с ними")
+    ap.add_argument("pdf", nargs="+",
+                    help="PDF с изометриями, папка с ними или рабочая книга .xlsx")
     ap.add_argument("-b", "--book",
                     help="рабочая книга .xlsx — нужна один раз, чтобы забрать "
                          "справочник «База»")
     ap.add_argument("-r", "--reference", default=DEFAULT_REFERENCE,
-                    help=f"файл сохранённого справочника (по умолчанию {DEFAULT_REFERENCE})")
-    ap.add_argument("-o", "--out", default="Заявка.xlsx", help="файл результата")
+                    help="файл сохранённого справочника")
+    ap.add_argument("-o", "--out", default=DEFAULT_OUT,
+                    help="файл результата (по умолчанию рядом с чертежами)")
     args = ap.parse_args(argv)
 
-    reference = load_reference(args.book, args.reference)
-    files = collect_pdfs(args.pdf)
+    files, dropped_book = sort_inputs(args.pdf)
+    reference = load_reference(args.book or dropped_book, args.reference)
     if not files:
-        raise SystemExit("не найдено ни одного PDF")
+        raise SystemExit("не найдено ни одного PDF с изометриями")
+
+    if args.out == DEFAULT_OUT:
+        # Результат кладём рядом с чертежами, а не в папку программы.
+        args.out = str(files[0].parent / DEFAULT_OUT)
 
     rows, built = [], []
     for path in files:
