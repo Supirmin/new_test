@@ -26,13 +26,28 @@ class Word:
     confidence: float
 
 
+INSTALL_HINT = ("pip install rapidocr-onnxruntime "
+                "(если откажется из-за версии Python — тот же вызов "
+                "с ключом --ignore-requires-python)")
+
+
 @lru_cache(maxsize=1)
 def _engine():
-    try:
-        from rapidocr_onnxruntime import RapidOCR
-    except ImportError:
-        return None
-    return RapidOCR()
+    """Движок распознавания, если он установлен.
+
+    У пакета два имени: старое `rapidocr_onnxruntime` и новое `rapidocr`.
+    Берём любой, какой найдётся.
+    """
+    for module in ("rapidocr_onnxruntime", "rapidocr"):
+        try:
+            RapidOCR = __import__(module, fromlist=["RapidOCR"]).RapidOCR
+        except (ImportError, AttributeError):
+            continue
+        try:
+            return RapidOCR()
+        except Exception:                     # движок есть, но не поднялся
+            continue
+    return None
 
 
 def available() -> bool:
@@ -46,7 +61,8 @@ def _run(image_bytes: bytes, scale_x: float, scale_y: float,
         return []
     # Картинку отдаём движку байтами как есть: после пересборки через
     # промежуточные библиотеки часть мелких подписей перестаёт находиться.
-    result, _ = engine(image_bytes)
+    outcome = engine(image_bytes)
+    result = _as_list(outcome)
     words = []
     for box, text, confidence in (result or []):
         x = sum(p[0] for p in box) / 4
@@ -54,6 +70,21 @@ def _run(image_bytes: bytes, scale_x: float, scale_y: float,
         words.append(Word(text.strip(), offset_x + x / scale_x,
                           offset_y + y / scale_y, float(confidence)))
     return words
+
+
+def _as_list(outcome):
+    """Привести ответ движка к общему виду: старый отдаёт кортеж, новый — объект."""
+    if outcome is None:
+        return []
+    if isinstance(outcome, tuple):
+        return outcome[0] or []
+    boxes = getattr(outcome, "boxes", None)
+    if boxes is None:
+        return outcome or []
+    texts = getattr(outcome, "txts", None) or []
+    scores = getattr(outcome, "scores", None) or []
+    return [(box, text, score)
+            for box, text, score in zip(boxes, texts, scores)]
 
 
 def read_page(page) -> list[Word]:

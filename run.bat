@@ -21,6 +21,28 @@ if not exist ".deps-ok" (
     echo ok> .deps-ok
 )
 
+rem Raspoznavanie kartinok stavitsya otdelno i ne obyazatelno:
+rem esli ne vstanet, programma vse ravno rabotaet.
+if not exist ".ocr-ok" if not exist ".ocr-skip" (
+    echo Ustanovka raspoznavaniya kartinok...
+    %PY% -m pip install --quiet --disable-pip-version-check -r requirements-ocr.txt >nul 2>nul
+    if errorlevel 1 (
+        %PY% -m pip install --quiet --disable-pip-version-check --ignore-requires-python -r requirements-ocr.txt >nul 2>nul
+    )
+    %PY% -c "import rapidocr_onnxruntime" >nul 2>nul
+    if errorlevel 1 (
+        echo ok> .ocr-skip
+        echo.
+        echo Raspoznavanie kartinok ne ustanovilos - eto ne oshibka.
+        echo Programma budet rabotat, no listy, gde tablitsy vstavleny
+        echo kartinkoy, prochitayutsya ne polnostyu.
+        echo Chtoby poprobovat snova, udalite fayl .ocr-skip
+        echo.
+    ) else (
+        echo ok> .ocr-ok
+    )
+)
+
 %PY% -m spooler %*
 if errorlevel 1 (
     echo.

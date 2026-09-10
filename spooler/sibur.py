@@ -285,6 +285,13 @@ def _piece_marks(page, rects) -> list[tuple[str, str, Mark]]:
     return out
 
 
+def _has_table_images(page) -> bool:
+    """Есть ли на листе картинки размером с таблицу, а не с логотип."""
+    return any(pymupdf.Rect(info["bbox"]).width > 60
+               and pymupdf.Rect(info["bbox"]).height > 60
+               for info in page.get_image_info())
+
+
 def read(page, page_no: int) -> tuple[Sheet, list[SpoolRow]]:
     text = page.get_text()
     sheet = Sheet(page=page_no)
@@ -322,6 +329,11 @@ def read(page, page_no: int) -> tuple[Sheet, list[SpoolRow]]:
 
     # Если длины вынесены в таблицу-картинку, доверяем ей: там они выписаны
     # прямо, а не выводятся из размерных цепочек.
+    if not ocr.available() and _has_table_images(page):
+        sheet.notes.append(
+            "в лист вставлены картинки — похоже, таблицы. Распознавание "
+            "не установлено, поэтому они не прочитаны. Установить: "
+            + ocr.INSTALL_HINT)
     table, rects = _cut_list(page) if ocr.available() else ({}, [])
     if table:
         pieces = _piece_marks(page, rects)
