@@ -236,11 +236,18 @@ class App:
         self.result = result
         self.open_btn.configure(state="normal")
         self.folder_btn.configure(state="normal")
-        tail = (f"\nГотово. {result.rows} строк заявки по {result.spools} спулам."
-                + (f"\nПроверьте лист «Расхождения» — там {result.issues} "
-                   f"строк." if result.issues else ""))
-        self._write(tail)
-        messagebox.showinfo(TITLE, f"Заявка собрана:\n{result.out}" + tail)
+        if result.rows:
+            tail = (f"\nГотово. {result.rows} строк заявки по {result.spools} спулам."
+                    + (f"\nПроверьте лист «Расхождения» — там {result.issues} "
+                       f"строк." if result.issues else ""))
+            self._write(tail)
+            messagebox.showinfo(TITLE, f"Заявка собрана:\n{result.out}" + tail)
+            return
+        self._write("\n" + result.warning)
+        messagebox.showwarning(
+            TITLE,
+            "Заявка получилась пустой.\n\n" + result.warning
+            + f"\n\nФайл всё равно записан — откройте лист «Расхождения»:\n{result.out}")
 
     def _fail(self, text: str) -> None:
         self._stop_progress()

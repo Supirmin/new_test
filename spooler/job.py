@@ -19,6 +19,7 @@ Log = Callable[[str], None]
 @dataclass
 class Result:
     out: pathlib.Path
+    warning: str = ""
     isos: int = 0
     spools: int = 0
     rows: int = 0
@@ -91,6 +92,18 @@ def collect_issues(built) -> list[Issue]:
     return issues
 
 
+def _why_empty(built) -> str:
+    """Своими словами, почему заявка пустая: причина лежит в замечаниях к листам."""
+    notes = [n for sheet, _ in built for n in sheet.notes]
+    if notes:
+        return notes[0]
+    if not built:
+        return ("ни один лист не удалось прочитать — скорее всего это формат "
+                "чертежа, которого программа ещё не знает.")
+    return ("листы прочитаны, но состав спулов собрать не из чего. "
+            "Подробности на листе «Расхождения».")
+
+
 def run(paths: Iterable[str], out: str | None = None, log: Log = print,
         reference_path: pathlib.Path = REFERENCE_FILE) -> Result:
     """Прочитать чертежи и записать заявку. Бросает ValueError с внятным текстом."""
@@ -117,18 +130,24 @@ def run(paths: Iterable[str], out: str | None = None, log: Log = print,
         log(f"        листов {len(file_built)}, изометрий {len(isos)}, "
             f"спулов {sum(len(sp) for _, sp in file_built)}")
 
-    if not rows:
-        raise ValueError(
-            "В выбранных файлах не нашлось ни одной изометрии, которую "
-            "программа умеет читать.\n"
-            "Скорее всего это другой формат чертежа — пришлите такой PDF "
-            "разработчику.")
-
     target = pathlib.Path(out) if out else files[0].parent / DEFAULT_OUT
     issues = collect_issues(built)
+
+    # Пустой результат — не повод бросать пользователя без ответа: причина
+    # уже собрана в «Расхождениях», её и надо показать.
+    warning = ""
+    if not rows:
+        warning = _why_empty(built)
+        log("")
+        log("Ни одной строки заявки не собралось. " + warning)
+        if not issues:
+            issues.append(Issue(
+                files[0].name, "", "лист не разобран",
+                "программа не нашла на листе ни ведомости швов, ни разметки "
+                "спулирования — пришлите этот PDF разработчику"))
     write_workbook(str(target), rows, reference, issues)
 
-    result = Result(out=target, rows=len(rows), issues=len(issues),
+    result = Result(out=target, warning=warning, rows=len(rows), issues=len(issues),
                     isos=len({s.iso for s, _ in built if s.iso}),
                     spools=sum(len(sp) for _, sp in built),
                     files=[p.name for p in files])
