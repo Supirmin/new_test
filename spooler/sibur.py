@@ -43,8 +43,45 @@ def looks_like_sibur(page) -> bool:
     return MARKER in page.get_text()
 
 
-def _marks(page) -> list[Mark]:
+def _annotation_marks(page) -> list[Mark]:
+    """AutoCAD кладёт часть подписей не в текст, а в аннотации SHX Text.
+
+    На одних листах подписи спулов — обычный текст, на других — аннотации;
+    читать надо и то и другое. Кегля у аннотации нет, поэтому берём высоту
+    прямоугольника: у повёрнутой подписи это её ширина.
+    """
     out: list[Mark] = []
+    for a in page.annots() or []:
+        text = a.info.get("content", "").strip()
+        if not text:
+            continue
+        r = a.rect
+        vertical = r.height > r.width
+        out.append(Mark(text, (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2,
+                        round(r.width if vertical else r.height, 1), vertical))
+    return out
+
+
+LEGEND_WORDS = ("спул", "шов", "катушк", "Условные")
+
+
+def _drop_legend(marks: list[Mark], radius: float = 110) -> list[Mark]:
+    """Убрать образцы из «Условных обозначений».
+
+    В легенде нарисованы такие же подписи — SP01, S1, <1>, — и если принять их
+    за настоящие, все ближайшие позиции уедут в несуществующий спул.
+    """
+    anchors = [m for m in marks
+               if any(w.lower() in m.text.lower() for w in LEGEND_WORDS)]
+    if not anchors:
+        return marks
+    return [m for m in marks
+            if m in anchors
+            or all(math.hypot(m.x - a.x, m.y - a.y) > radius for a in anchors)]
+
+
+def _marks(page) -> list[Mark]:
+    out: list[Mark] = _annotation_marks(page)
     for block in page.get_text("dict")["blocks"]:
         for line in block.get("lines", []):
             direction = line.get("dir", (1, 0))
@@ -114,16 +151,22 @@ def _mm(qty: str) -> float | None:
     return float(m.group(1).replace(",", ".")) * 1000 if m else None
 
 
-def _drawing_box(spools: list[Mark], lengths: list[Mark]):
-    """Поле чертежа очерчиваем по самим подписям — рамка листа сюда не попадёт."""
-    pts = [(m.x, m.y) for m in spools + lengths]
-    if not pts:
+def _drawing_box(marks: list[Mark], margin: float = 0.2):
+    """Поле чертежа очерчиваем по самим подписям — штамп и рамка сюда не попадут."""
+    if not marks:
         return None
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    mx = max((max(xs) - min(xs)) * 0.2, 60)
-    my = max((max(ys) - min(ys)) * 0.2, 60)
+    xs = [m.x for m in marks]
+    ys = [m.y for m in marks]
+    mx = max((max(xs) - min(xs)) * margin, 60)
+    my = max((max(ys) - min(ys)) * margin, 60)
     return min(xs) - mx, max(xs) + mx, min(ys) - my, max(ys) + my
+
+
+def _inside(box):
+    if box is None:
+        return lambda m: True
+    x0, x1, y0, y1 = box
+    return lambda m: x0 <= m.x <= x1 and y0 <= m.y <= y1
 
 
 def _nearest(mark: Mark, spools: list[Mark]) -> str:
@@ -146,6 +189,56 @@ def _main_dn(size: str) -> float | None:
     return float(m.group(1).replace(",", ".")) if m else None
 
 
+def _cut_lengths(numeric: list[Mark], skip: set[str] = frozenset()) -> tuple[list[Mark], float]:
+    """Отделить длины реза от размерных цепочек.
+
+    На одних листах длины набраны мельче размеров — тогда достаточно кегля.
+    На других весь текст одного кегля, и различает только расположение: длина
+    реза подписана вплотную к своему размеру и всегда меньше его, потому что
+    из размера вычтены отводы. В такой связке длиной реза считается наименьшее
+    число.
+    """
+    numeric = [m for m in numeric if m.text not in skip]
+    if not numeric:
+        return [], 0.0
+    sizes = sorted({m.size for m in numeric})
+    if len(sizes) > 1:
+        small = [m for m in numeric if m.size == sizes[0]]
+        if small:
+            return small, sizes[0]
+
+    clusters = _cluster(numeric)
+    out: list[Mark] = []
+    for group in clusters:
+        if len(group) < 2:
+            continue
+        least = min(float(m.text) for m in group)
+        out.extend(m for m in group if float(m.text) == least)
+    return out, sizes[0]
+
+
+def _cluster(marks: list[Mark], radius: float = 25) -> list[list[Mark]]:
+    """Подписи, стоящие вплотную друг к другу, — это одна размерная связка."""
+    parent = list(range(len(marks)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, a in enumerate(marks):
+        for j in range(i + 1, len(marks)):
+            b = marks[j]
+            if math.hypot(a.x - b.x, a.y - b.y) <= radius:
+                parent[find(i)] = find(j)
+
+    groups: dict[int, list[Mark]] = defaultdict(list)
+    for i, m in enumerate(marks):
+        groups[find(i)].append(m)
+    return list(groups.values())
+
+
 def read(page, page_no: int) -> tuple[Sheet, list[SpoolRow]]:
     text = page.get_text()
     sheet = Sheet(page=page_no)
@@ -161,7 +254,7 @@ def read(page, page_no: int) -> tuple[Sheet, list[SpoolRow]]:
     sheet.revision = rev.group(1) if rev else "0"
 
     sheet.materials = _materials(text)
-    marks = _marks(page)
+    marks = _drop_legend(_marks(page))
 
     spool_marks = [m for m in marks if SPOOL_RE.match(m.text.replace(" ", ""))]
     if not spool_marks:
@@ -169,33 +262,49 @@ def read(page, page_no: int) -> tuple[Sheet, list[SpoolRow]]:
             "на чертеже нет подписей спулов (SP01, SP02…) — разбивку взять неоткуда")
         return sheet, []
 
-    numeric = [m for m in marks if re.fullmatch(r"\d{2,5}", m.text)]
-    sizes = sorted({m.size for m in numeric})
-    if len(sizes) < 2:
+    # Сначала грубая рамка — по одним подписям спулов: они всегда внутри поля
+    # чертежа. Размеры подписаны вдоль трубы и вертикальными бывают редко,
+    # а штамп и рамка листа набраны вертикально — так и отсеиваются.
+    rough = _inside(_drawing_box(spool_marks, margin=0.4))
+    numeric = [m for m in marks
+               if re.fullmatch(r"\d{2,5}", m.text) and rough(m) and not m.vertical]
+    # Диаметры подписаны такими же числами, что и размеры: «50» у DN50 — это
+    # не длина реза. Берём диаметры из спецификации листа и исключаем их.
+    diameters = {part.strip() for item in sheet.materials
+                 for part in re.split(r"[xX]", item.size) if part.strip()}
+    lengths, cut_size = _cut_lengths(numeric, diameters)
+    if not lengths:
         sheet.notes.append(
-            "не удалось отличить длины отрезков трубы от размерных цепочек — "
-            "весь текст размеров одного кегля")
+            "не удалось отличить длины отрезков трубы от размерных цепочек")
         return sheet, []
-    cut_size = sizes[0]                       # длины реза набраны мельче размеров
 
-    lengths = [m for m in numeric if m.size == cut_size]
-    box = _drawing_box(spool_marks, lengths)
-    if box:
-        x0, x1, y0, y1 = box
-        inside = lambda m: x0 <= m.x <= x1 and y0 <= m.y <= y1  # noqa: E731
-    else:
-        inside = lambda m: True                                 # noqa: E731
-
-    # Размеры подписаны вдоль трубы, поэтому вертикальными бывают редко, а вот
-    # штамп и рамка набраны вертикально — так и отсеиваются.
-    lengths = [m for m in lengths if inside(m)
-               and (not m.vertical or _has_dimension_near(m, numeric))]
+    # Теперь рамка точная — по спулам и найденным длинам. Выноска позиции
+    # повёрнута как придётся — вдоль трубы или вертикально, — поэтому
+    # опознаём её по значению: это номер строки спецификации, не размер.
+    inside = _inside(_drawing_box(spool_marks + lengths))
+    last = max((int(m.pt_no) for m in sheet.materials if m.pt_no.isdigit()),
+               default=0)
+    chosen = {id(m) for m in lengths}
     balloons = [m for m in marks
-                if re.fullmatch(r"\d{1,3}", m.text) and m.vertical
-                and m.size > cut_size and inside(m)]
+                if re.fullmatch(r"\d{1,3}", m.text) and inside(m)
+                and id(m) not in chosen
+                and 0 < int(m.text) <= last
+                and m.text not in diameters]
 
     sheet.marked_spools = sorted({_nearest(m, spool_marks) for m in spool_marks})
     return sheet, _rows(sheet, spool_marks, lengths, balloons)
+
+
+def _nearest_pipe(mark: Mark, pipe_balloons: list[Mark],
+                  radius: float = 60) -> str | None:
+    """Номер позиции трубы по ближайшей выноске; далёкие выноски не в счёт."""
+    if not pipe_balloons:
+        return None
+    best = min(pipe_balloons,
+               key=lambda b: math.hypot(b.x - mark.x, b.y - mark.y))
+    if math.hypot(best.x - mark.x, best.y - mark.y) > radius:
+        return None
+    return best.text.lstrip("0")
 
 
 def _rows(sheet: Sheet, spool_marks: list[Mark], lengths: list[Mark],
@@ -209,21 +318,19 @@ def _rows(sheet: Sheet, spool_marks: list[Mark], lengths: list[Mark],
         dn = _main_dn(fabrication[no].size)
         return dn is None or dn >= 50
 
-    # Длины реза раскладываем по спулам, а сами трубы — по позициям спецификации:
-    # ровно совпавшую длину отдаём своей позиции, остальное — самой длинной трубе.
-    by_spool: dict[str, list[float]] = defaultdict(list)
-    for mark in lengths:
-        by_spool[_nearest(mark, spool_marks)].append(float(mark.text))
-
+    # Длина реза относится к ближайшему спулу, а какая это труба — подсказывает
+    # ближайшая выноска с номером позиции: на одной линии их бывает несколько,
+    # разного материала и диаметра.
+    pipe_balloons = [m for m in balloons if m.text.lstrip("0") in pipes]
     exact = {round(_mm(m.qty)): no for no, m in pipes.items()}
     main = max(pipes, key=lambda no: _mm(pipes[no].qty)) if pipes else None
 
     totals: dict[tuple[str, str], float] = defaultdict(float)
-    for spool, values in by_spool.items():
-        for value in values:
-            no = exact.get(round(value), main)
-            if no is not None:
-                totals[(spool, no)] += value
+    for mark in lengths:
+        value = float(mark.text)
+        no = _nearest_pipe(mark, pipe_balloons) or exact.get(round(value), main)
+        if no is not None:
+            totals[(_nearest(mark, spool_marks), no)] += value
 
     for mark in balloons:
         no = mark.text.lstrip("0")
