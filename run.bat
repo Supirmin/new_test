@@ -21,12 +21,6 @@ if not exist ".deps-ok" (
     echo ok> .deps-ok
 )
 
-if "%~1"=="" (
-    %PY% -m spooler.hint
-    pause
-    exit /b 0
-)
-
 %PY% -m spooler.cli %*
 echo.
 pause

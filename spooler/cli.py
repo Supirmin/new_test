@@ -19,6 +19,17 @@ DEFAULT_REFERENCE = str(pathlib.Path(__file__).resolve().parent.parent / "spravo
 DEFAULT_OUT = "Заявка.xlsx"
 
 
+def _own_folder() -> list[str]:
+    """Файлы рядом с программой: чтобы запуск двойным щелчком тоже работал."""
+    home = pathlib.Path(__file__).resolve().parent.parent
+    found = [str(p) for p in sorted(home.glob("*.pdf"))]
+    books = [p for p in sorted(home.glob("*.xls*")) if not p.name.startswith("~$")]
+    if found:
+        print(f"файлы взяты из папки программы: {home}")
+        found += [str(p) for p in books]
+    return found
+
+
 def sort_inputs(paths: list[str]) -> tuple[list[pathlib.Path], str | None]:
     """Разложить перетащенные файлы: PDF — чертежи, XLSX — рабочая книга.
 
@@ -91,8 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="spooler",
         description="Читает изометрии из PDF и собирает заявку по спулам в Excel.")
-    ap.add_argument("pdf", nargs="+",
-                    help="PDF с изометриями, папка с ними или рабочая книга .xlsx")
+    ap.add_argument("pdf", nargs="*",
+                    help="PDF с изометриями, папка с ними или рабочая книга .xlsx; "
+                         "без аргументов берутся файлы из папки программы")
     ap.add_argument("-b", "--book",
                     help="рабочая книга .xlsx — нужна один раз, чтобы забрать "
                          "справочник «База»")
@@ -102,10 +114,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="файл результата (по умолчанию рядом с чертежами)")
     args = ap.parse_args(argv)
 
-    files, dropped_book = sort_inputs(args.pdf)
+    files, dropped_book = sort_inputs(args.pdf or _own_folder())
     reference = load_reference(args.book or dropped_book, args.reference)
     if not files:
-        raise SystemExit("не найдено ни одного PDF с изометриями")
+        from .hint import TEXT
+        raise SystemExit(TEXT)
 
     if args.out == DEFAULT_OUT:
         # Результат кладём рядом с чертежами, а не в папку программы.
