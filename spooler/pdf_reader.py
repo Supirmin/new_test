@@ -81,6 +81,8 @@ class Sheet:
     revision: str = ""
     sheet_no: str = ""
     area: str = ""
+    fmt: str = "intergraph"
+    prebuilt_rows: list = field(default_factory=list)
     welds: list[Weld] = field(default_factory=list)
     materials: list[MaterialItem] = field(default_factory=list)
     marked_spools: list[str] = field(default_factory=list)
@@ -322,8 +324,18 @@ def read_sheet(page, page_no: int) -> Sheet:
 
 
 def read_pdf(path: str) -> list[Sheet]:
+    from . import sibur                       # отложенный импорт: sibur читает Sheet
+
     doc = pymupdf.open(path)
-    return [read_sheet(page, i + 1) for i, page in enumerate(doc)]
+    sheets = []
+    for i, page in enumerate(doc):
+        if sibur.looks_like_sibur(page):
+            sheet, rows = sibur.read(page, i + 1)
+            sheet.prebuilt_rows = rows
+        else:
+            sheet = read_sheet(page, i + 1)
+        sheets.append(sheet)
+    return sheets
 
 
 def derive_iso(sheets: list[Sheet]) -> None:

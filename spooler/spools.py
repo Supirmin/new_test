@@ -17,6 +17,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from .models import SpoolRow
 from .pdf_reader import MaterialItem, Sheet, derive_iso
 
 
@@ -31,20 +32,6 @@ class Spool:
     @property
     def kind(self) -> str:
         return "SP" if self.welded else "E-SP"
-
-
-@dataclass
-class SpoolRow:
-    """Строка заявки: один материал в одном спуле."""
-    iso: str
-    line: str
-    revision: str
-    spool: str
-    ident: str
-    qty: float
-    unit: str                    # «мм» для трубы, «шт» для фасонных изделий
-    size: str
-    description: str
 
 
 def _weld_no(weld: str) -> int:
@@ -262,6 +249,11 @@ def process(sheets: list[Sheet]) -> tuple[list[SpoolRow], list[tuple[Sheet, list
     rows: list[SpoolRow] = []
     built: list[tuple[Sheet, list[Spool]]] = []
     for sheet in sheets:
+        if sheet.fmt == "sibur":
+            rows.extend(sheet.prebuilt_rows)
+            names = sorted({r.spool for r in sheet.prebuilt_rows})
+            built.append((sheet, [Spool(name=n) for n in names]))
+            continue
         if not sheet.welds and not sheet.materials:
             continue
         key = sheet.line or sheet.iso
