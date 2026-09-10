@@ -26,6 +26,7 @@ class Spool:
     parts: list[str] = field(default_factory=list)
     welds: list[str] = field(default_factory=list)
     welded: bool = True          # False -> E-SP, спул без сварки
+    continues: bool = False      # продолжается на следующем листе
 
     @property
     def kind(self) -> str:
@@ -72,10 +73,45 @@ def _part_key(pt: str) -> int:
     return int(pt) if pt.isdigit() else 10**6
 
 
+def _capacity(item: MaterialItem | None) -> int:
+    """Сколько стыковых швов физически может иметь деталь."""
+    text = (item.description if item else "").lower()
+    if text.startswith("tee") or " tee" in text:
+        return 3
+    return 2
+
+
+def cross_sheet_welds(sheet: Sheet) -> set[str]:
+    """Швы, ссылающиеся на деталь соседнего листа.
+
+    Нумерация деталей у Intergraph своя на каждом листе, поэтому шов на стыке
+    листов ссылается на номер с продолжения. Отличить его можно по перебору
+    концов: у трубы или отвода их два, у тройника три, а приварка бобышки
+    (LET) конец не занимает. Всё сверх нормы — ссылка за пределы листа.
+    """
+    ends: dict[str, list[str]] = defaultdict(list)
+    for w in sheet.welds:
+        pair = w.parts
+        if not pair or w.kind.strip().upper() == "LET":
+            continue
+        for pt in pair:
+            if pt != "*":
+                ends[pt].append(w.no)
+
+    crossing: set[str] = set()
+    for pt, welds in ends.items():
+        limit = _capacity(sheet.material(pt))
+        if len(welds) > limit:
+            for weld in sorted(welds, key=_weld_no)[limit:]:
+                crossing.add(weld)
+    return crossing
+
+
 def build_spools(sheet: Sheet, start_number: int = 1) -> list[Spool]:
     fabrication = {m.pt_no for m in sheet.materials if not m.erection}
     if not fabrication:
         return []
+    crossing = cross_sheet_welds(sheet)
 
     # 1. Склейка деталей цеховыми швами.
     uf = _Union()
@@ -87,12 +123,18 @@ def build_spools(sheet: Sheet, start_number: int = 1) -> list[Spool]:
         if not pair:
             continue
         a, b = pair
-        if w.is_shop and a in fabrication and b in fabrication:
+        if w.is_shop and a in fabrication and b in fabrication and w.no not in crossing:
             uf.union(a, b)
     for w in sheet.welds:
         pair = w.parts
-        if pair and w.is_shop and pair[0] in fabrication:
-            shop_welds[uf.find(pair[0])].append(w.no)
+        if not pair or not w.is_shop:
+            continue
+        # Шов на границе листа тоже делает спул сварным, хотя вторая деталь
+        # лежит на соседнем листе.
+        for pt in pair:
+            if pt in fabrication:
+                shop_welds[uf.find(pt)].append(w.no)
+                break
 
     groups: dict[str, set[str]] = defaultdict(set)
     for pt in fabrication:
@@ -105,7 +147,7 @@ def build_spools(sheet: Sheet, start_number: int = 1) -> list[Spool]:
         if not pair or w.is_shop:
             continue
         a, b = pair
-        if a in fabrication and b in fabrication:
+        if a in fabrication and b in fabrication and w.no not in crossing:
             ra, rb = uf.find(a), uf.find(b)
             if ra != rb:
                 links[ra].append((_weld_no(w.no), rb))
@@ -129,16 +171,41 @@ def build_spools(sheet: Sheet, start_number: int = 1) -> list[Spool]:
             nxt = [r for _, r in sorted(links.get(node, [])) if r not in seen]
             stack.extend(reversed(nxt))
 
+    # Спул продолжается на соседнем листе, если у детали остался свободный
+    # конец: у трубы и отвода их два, у тройника три, приварка бобышки (LET)
+    # конец не занимает. Недостача концов означает, что труба уходит за лист.
+    ends: dict[str, int] = defaultdict(int)
+    for w in sheet.welds:
+        pair = w.parts
+        if not pair or w.kind.strip().upper() == "LET":
+            continue
+        for pt in pair:
+            if pt in fabrication:
+                ends[pt] += 1
+
+    leaving: set[str] = set()
+    for pt in fabrication:
+        if ends[pt] < _capacity(sheet.material(pt)):
+            leaving.add(uf.find(pt))
+    for w in sheet.welds:
+        pair = w.parts
+        if pair and w.is_shop and (w.no in crossing or "*" in w.location):
+            for pt in pair:
+                if pt in fabrication:
+                    leaving.add(uf.find(pt))
+
     spools = []
     for i, root in enumerate(order):
         welds = sorted(set(shop_welds.get(root, [])), key=_weld_no)
-        welded = bool(welds)
+        # Спул, уходящий за лист, сварной: цеховой шов у него на соседнем листе.
+        welded = bool(welds) or root in leaving
         number = start_number + i
         spools.append(Spool(
             name=f"{'' if welded else 'E-'}SP{number:02d}",
             parts=sorted(groups[root], key=_part_key),
             welds=welds,
             welded=welded,
+            continues=root in leaving,
         ))
     return spools
 
@@ -180,6 +247,14 @@ def spool_rows(sheet: Sheet, spools: list[Spool]) -> list[SpoolRow]:
     return rows
 
 
+def _marked_start(sheet: Sheet, count: int) -> int | None:
+    numbers = sorted({int(re.sub(r"\D", "", n)) for n in sheet.marked_spools
+                      if re.sub(r"\D", "", n)})
+    if len(numbers) != count or not numbers:
+        return None
+    return numbers[0]
+
+
 def process(sheets: list[Sheet]) -> tuple[list[SpoolRow], list[tuple[Sheet, list[Spool]]]]:
     """Нумерация сквозная в пределах одной линии, листы идут по порядку."""
     derive_iso(sheets)
@@ -191,7 +266,19 @@ def process(sheets: list[Sheet]) -> tuple[list[SpoolRow], list[tuple[Sheet, list
             continue
         key = sheet.line or sheet.iso
         spools = build_spools(sheet, counters[key])
-        counters[key] += len(spools)
+        # Если на чертеже размечено столько же спулов, сколько насчитала
+        # программа, доверяем нумерации чертежа — она учитывает переходы
+        # спулов с листа на лист.
+        anchor = _marked_start(sheet, len(spools))
+        if anchor is not None and anchor != counters[key]:
+            counters[key] = anchor
+            spools = build_spools(sheet, anchor)
+        # Если последний спул листа уходит на следующий лист, там он
+        # продолжается под тем же номером.
+        step = len(spools)
+        if spools and spools[-1].continues:
+            step -= 1
+        counters[key] += max(step, 0)
         rows.extend(spool_rows(sheet, spools))
         built.append((sheet, spools))
     return rows, built

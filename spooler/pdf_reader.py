@@ -243,9 +243,11 @@ def _read_title_block(cells: list[Cell], sheet: Sheet) -> None:
     head = _find(cells, "DRG. NO.")
     if head is not None:
         no = _value_below(cells, head, dx=20, pattern=r"\d{1,2}")
-        if no and re.search(r"ISO-0*\d*$", sheet.iso):
+        if no:
             sheet.sheet_no = no
-            sheet.iso = re.sub(r"(ISO-)0*\d*$", lambda m: m.group(1) + no.zfill(4), sheet.iso)
+            if re.search(r"ISO-0*\d*$", sheet.iso):
+                sheet.iso = re.sub(r"(ISO-)0*\d*$",
+                                   lambda m: m.group(1) + no.zfill(4), sheet.iso)
 
     # Ревизия — в журнале изменений слева внизу, колонка REVISION.
     head = _find(cells, "REVISION")
